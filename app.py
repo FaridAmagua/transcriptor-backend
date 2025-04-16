@@ -1,69 +1,79 @@
-# app.py
-
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 import os
 import requests
 from dotenv import load_dotenv
+import time
 
-# Cargar variables de entorno desde .env si existe
+from flask_cors import CORS
+
+# Cargar variables de entorno
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app)  # Soluciona el error de CORS entre React y Flask
 
-# Ruta principal para probar que el servidor funciona
-@app.route("/", methods=["GET"])
+ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
+
+@app.route("/")
 def home():
-    return jsonify({"message": "Servidor de transcripción en línea 🚀"}), 200
+    return jsonify({"message": "Servidor de transcripción activo 🚀"}), 200
 
-# Ruta para transcribir un audio vía AssemblyAI
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
     try:
-        # Obtener archivo de audio
         audio = request.files.get("audio")
         if not audio:
             return jsonify({"error": "No se envió ningún archivo de audio"}), 400
 
-        # Guardar temporalmente el archivo
-        audio.save("temp_audio.wav")
+        # Guardar archivo temporal
+        audio_path = "temp_audio.wav"
+        audio.save(audio_path)
 
-        # Subir el audio a AssemblyAI
-        with open("temp_audio.wav", "rb") as f:
-            response = requests.post(
+        # Subir a AssemblyAI
+        with open(audio_path, "rb") as f:
+            upload_res = requests.post(
                 "https://api.assemblyai.com/v2/upload",
-                headers={"authorization": os.getenv("ASSEMBLYAI_API_KEY")},
+                headers={"authorization": ASSEMBLYAI_API_KEY},
                 data=f
             )
-        upload_url = response.json()["upload_url"]
+        upload_url = upload_res.json()["upload_url"]
 
         # Enviar a transcripción
-        json_data = {
-            "audio_url": upload_url,
-            "language_code": "es"  # Puedes cambiar esto según el idioma
-        }
-
-        transcript_response = requests.post(
+        transcript_req = requests.post(
             "https://api.assemblyai.com/v2/transcript",
-            json=json_data,
-            headers={"authorization": os.getenv("ASSEMBLYAI_API_KEY")}
+            json={"audio_url": upload_url, "language_code": "es"},
+            headers={"authorization": ASSEMBLYAI_API_KEY}
         )
+        transcript_id = transcript_req.json()["id"]
 
-        transcript_id = transcript_response.json()["id"]
-
-        # Esperar a que termine la transcripción
+        # Esperar a que esté lista
         polling_endpoint = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
         while True:
-            polling_response = requests.get(polling_endpoint, headers={"authorization": os.getenv("ASSEMBLYAI_API_KEY")})
-            status = polling_response.json()["status"]
-
+            poll_res = requests.get(polling_endpoint, headers={"authorization": ASSEMBLYAI_API_KEY})
+            status = poll_res.json()["status"]
             if status == "completed":
-                return jsonify({"transcription": polling_response.json()["text"]}), 200
+                text = poll_res.json()["text"]
+                break
             elif status == "error":
-                return jsonify({"error": polling_response.json()["error"]}), 500
+                return jsonify({"error": poll_res.json()["error"]}), 500
+            time.sleep(1)
+
+        # Guardar en archivo .txt
+        output_path = "transcription.txt"
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+        # Enviar como archivo descargable
+        return send_file(output_path, as_attachment=True)
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Iniciar la app
+    finally:
+        # Limpieza (aunque falle)
+        if os.path.exists("temp_audio.wav"):
+            os.remove("temp_audio.wav")
+
+# Ejecutar
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
